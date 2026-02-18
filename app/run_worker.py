@@ -1,0 +1,53 @@
+import asyncio
+
+from temporalio.client import Client
+from temporalio.worker import Worker
+
+from app.activities import (
+    extract_bill_data,
+    prefix_unit_name_to_file,
+    suffix_date_range_to_file,
+    get_tenant_data,
+    enter_bill_apartments_com,
+    undo_apartments_com_entry,
+    update_monthly_expenses,
+    update_income_expense_overview,
+    undo_monthly_expenses,
+    undo_income_expense_overview,
+    draft_email_from_template,
+    attach_bill,
+    send_email,
+    move_file_to_gdrive,
+)
+from app.workflows import BillProcessorWorkflow
+
+
+async def main():
+    client = await Client.connect("localhost:7233")
+    worker = Worker(
+        client,
+        task_queue="bill-processor",
+        workflows=[BillProcessorWorkflow],
+        activities=[
+            extract_bill_data,
+            prefix_unit_name_to_file,
+            suffix_date_range_to_file,
+            get_tenant_data,
+            enter_bill_apartments_com,
+            undo_apartments_com_entry,
+            update_monthly_expenses,
+            update_income_expense_overview,
+            undo_monthly_expenses,
+            undo_income_expense_overview,
+            draft_email_from_template,
+            attach_bill,
+            send_email,
+            move_file_to_gdrive,
+        ],
+    )
+    print("Worker started, press ctrl-c to exit")
+    await worker.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

@@ -1,0 +1,32 @@
+import asyncio
+import uuid
+
+from temporalio import activity
+
+from app.shared.data import BillData, TenantData
+
+
+@activity.defn
+async def draft_email_from_template(bill: BillData, tenant: TenantData) -> str:
+    activity.logger.info(
+        "Drafting bill email to %s for unit=%s amount=%s",
+        tenant.email,
+        bill.unit,
+        bill.amount,
+    )
+    await asyncio.sleep(0.5)
+    draft_id = str(uuid.uuid4())
+    activity.logger.info("Created draft %s", draft_id)
+    return draft_id
+
+
+@activity.defn
+async def attach_bill(draft_id: str, bill: BillData) -> None:
+    activity.logger.info("Attaching %s to draft %s", bill.processed_file_name, draft_id)
+    await asyncio.sleep(0.5)
+
+
+@activity.defn
+async def send_email(draft_id: str) -> None:
+    activity.logger.info("Sending email draft %s", draft_id)
+    await asyncio.sleep(0.5)
