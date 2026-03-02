@@ -47,20 +47,14 @@ async def extract_bill_data(file_path: str) -> BillData:
 
 
 @activity.defn
-async def prefix_unit_name_to_file(bill: BillData) -> BillData:
+async def add_unit_and_date_range_to_file(bill: BillData) -> BillData:
     activity.logger.info(
-        "Prefixing unit %s to file %s", bill.unit, bill.processed_file_name
+        "Renaming file for unit=%s date_range=%s: %s",
+        bill.unit,
+        bill.date_range,
+        bill.processed_file_name,
     )
     await asyncio.sleep(0.5)
     new_name = _add_prefix(bill.processed_file_name, bill.unit)
-    return dataclasses.replace(bill, processed_file_name=new_name)
-
-
-@activity.defn
-async def suffix_date_range_to_file(bill: BillData) -> BillData:
-    activity.logger.info(
-        "Suffixing date range %s to file %s", bill.date_range, bill.processed_file_name
-    )
-    await asyncio.sleep(0.5)
-    new_name = _add_suffix(bill.processed_file_name, bill.date_range)
+    new_name = _add_suffix(new_name, bill.date_range)
     return dataclasses.replace(bill, processed_file_name=new_name)

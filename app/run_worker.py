@@ -5,8 +5,7 @@ from temporalio.worker import Worker
 
 from app.activities import (
     extract_bill_data,
-    prefix_unit_name_to_file,
-    suffix_date_range_to_file,
+    add_unit_and_date_range_to_file,
     get_tenant_data,
     enter_bill_apartments_com,
     undo_apartments_com_entry,
@@ -30,8 +29,7 @@ async def main():
         workflows=[BillProcessorWorkflow],
         activities=[
             extract_bill_data,
-            prefix_unit_name_to_file,
-            suffix_date_range_to_file,
+            add_unit_and_date_range_to_file,
             get_tenant_data,
             enter_bill_apartments_com,
             undo_apartments_com_entry,

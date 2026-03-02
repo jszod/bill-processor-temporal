@@ -1,9 +1,8 @@
 from app.activities.file_processing import (
     extract_bill_data,
-    prefix_unit_name_to_file,
-    suffix_date_range_to_file,
+    add_unit_and_date_range_to_file,
 )
-from app.activities.apartments import (
+from app.activities.property_management import (
     get_tenant_data,
     enter_bill_apartments_com,
     undo_apartments_com_entry,
@@ -23,8 +22,7 @@ from app.activities.archive import move_file_to_gdrive
 
 __all__ = [
     "extract_bill_data",
-    "prefix_unit_name_to_file",
-    "suffix_date_range_to_file",
+    "add_unit_and_date_range_to_file",
     "get_tenant_data",
     "enter_bill_apartments_com",
     "undo_apartments_com_entry",

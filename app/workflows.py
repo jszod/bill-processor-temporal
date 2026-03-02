@@ -6,8 +6,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from app.activities import (
         extract_bill_data,
-        prefix_unit_name_to_file,
-        suffix_date_range_to_file,
+        add_unit_and_date_range_to_file,
         get_tenant_data,
         enter_bill_apartments_com,
         undo_apartments_com_entry,
@@ -30,12 +29,28 @@ DEFAULT_RETRY = RetryPolicy(
     maximum_interval=timedelta(minutes=1),
 )
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
+REVIEW_TIMEOUT = timedelta(minutes=5)
 
 
 @workflow.defn
 class BillProcessorWorkflow:
+    def __init__(self) -> None:
+        self._review_status: str = "pending"  # pending | approved | rejected | timed_out
+
+    @workflow.signal
+    async def approve_email(self) -> None:
+        self._review_status = "approved"
+
+    @workflow.signal
+    async def reject_email(self) -> None:
+        self._review_status = "rejected"
+
+    @workflow.query
+    def email_review_status(self) -> str:
+        return self._review_status
+
     @workflow.run
-    async def run(self, file_path: str) -> str:
+    async def run(self, file_path: str) -> BillData:
         compensations: list[tuple] = []
 
         try:
@@ -48,20 +63,13 @@ class BillProcessorWorkflow:
             )
 
             bill = await workflow.execute_activity(
-                prefix_unit_name_to_file,
+                add_unit_and_date_range_to_file,
                 bill,
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
 
-            bill = await workflow.execute_activity(
-                suffix_date_range_to_file,
-                bill,
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
-                retry_policy=DEFAULT_RETRY,
-            )
-
-            # ── Apartments.com ───────────────────────────────────────────────
+            # ── Property Management (Apartments.com) ─────────────────────────
             tenant: TenantData = await workflow.execute_activity(
                 get_tenant_data,
                 bill.unit,
@@ -77,7 +85,7 @@ class BillProcessorWorkflow:
             )
             compensations.append((undo_apartments_com_entry, [bill, tenant]))
 
-            # ── Accounting (saga boundary) ───────────────────────────────────
+            # ── Accounting — saga boundary ───────────────────────────────────
             await workflow.execute_activity(
                 update_monthly_expenses,
                 bill,
@@ -96,12 +104,17 @@ class BillProcessorWorkflow:
 
         except Exception:
             for activity_fn, activity_args in reversed(compensations):
-                await workflow.execute_activity(
-                    activity_fn,
-                    args=activity_args,
-                    start_to_close_timeout=ACTIVITY_TIMEOUT,
-                    retry_policy=DEFAULT_RETRY,
-                )
+                try:
+                    await workflow.execute_activity(
+                        activity_fn,
+                        args=activity_args,
+                        start_to_close_timeout=ACTIVITY_TIMEOUT,
+                        retry_policy=DEFAULT_RETRY,
+                    )
+                except Exception:
+                    workflow.logger.warning(
+                        "Compensation %s failed — continuing", activity_fn.__name__
+                    )
             raise
 
         # ── Notification — best effort ───────────────────────────────────────
@@ -112,18 +125,29 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+
             await workflow.execute_activity(
                 attach_bill,
                 args=[draft_id, bill],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
-            await workflow.execute_activity(
-                send_email,
-                draft_id,
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
-                retry_policy=DEFAULT_RETRY,
+
+            # Human review gate
+            approved_in_time = await workflow.wait_condition(
+                lambda: self._review_status != "pending",
+                timeout=REVIEW_TIMEOUT,
             )
+            if not approved_in_time:
+                self._review_status = "timed_out"
+
+            if self._review_status == "approved":
+                await workflow.execute_activity(
+                    send_email,
+                    draft_id,
+                    start_to_close_timeout=ACTIVITY_TIMEOUT,
+                    retry_policy=DEFAULT_RETRY,
+                )
         except Exception:
             workflow.logger.warning("Courtesy email failed — continuing")
 
@@ -138,4 +162,4 @@ class BillProcessorWorkflow:
         except Exception:
             workflow.logger.warning("Archive failed — continuing")
 
-        return "ok"
+        return bill
