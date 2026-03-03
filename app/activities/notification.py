@@ -6,13 +6,18 @@ from app.shared.data import BillData, TenantData
 
 
 @activity.defn
-async def draft_email_from_template(bill: BillData, tenant: TenantData, idempotency_key: str) -> str:
+async def draft_email_from_template(
+    bill: BillData, tenant: TenantData, idempotency_key: str
+) -> str:
     activity.logger.info(
         "Drafting bill email to %s for unit=%s amount=%s",
         tenant.email,
         bill.unit,
         bill.amount,
     )
+    # ── DEMO: best-effort failure (workflow still completes) ──────────────────
+    # raise RuntimeError("Gmail API unavailable")
+    # ─────────────────────────────────────────────────────────────────────────
     await asyncio.sleep(3)
     draft_id = idempotency_key  # stable across retries
     activity.logger.info("Created draft %s", draft_id)

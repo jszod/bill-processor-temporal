@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
@@ -172,11 +173,12 @@ class BillProcessorWorkflow:
             workflow.logger.info(
                 "Waiting for email review signal (timeout %s)...", REVIEW_TIMEOUT
             )
-            received = await workflow.wait_condition(
-                lambda: self._review_status != "pending",
-                timeout=REVIEW_TIMEOUT,
-            )
-            if not received:
+            try:
+                await workflow.wait_condition(
+                    lambda: self._review_status != "pending",
+                    timeout=REVIEW_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
                 self._review_status = "timed_out"
             workflow.logger.info("Review status: %s", self._review_status)
 

@@ -43,6 +43,20 @@ From the Temporal UI, open the running workflow and send one of these signals:
 
 The review gate times out after **35 seconds** if no signal is received.
 
+## Simulating Errors
+
+Each scenario is a one-line uncomment in the relevant activity file. After editing, restart the worker to pick up the change.
+
+| Scenario | File | Line to uncomment |
+|---|---|---|
+| Fast-fail — no retries | `app/activities/property_management.py` | `raise ApplicationError(...)` in `get_tenant_data` |
+| Saga: retry 5× then compensate | `app/activities/accounting.py` | `raise RuntimeError(...)` in `update_income_expense_overview` |
+| Saga: immediate compensate | `app/activities/accounting.py` | `raise ApplicationError(...)` in `update_income_expense_overview` |
+| Best-effort email failure | `app/activities/notification.py` | `raise RuntimeError(...)` in `draft_email_from_template` |
+| Best-effort archive failure | `app/activities/archive.py` | `raise RuntimeError(...)` in `move_file_to_gdrive` |
+
+Look for the `# ── DEMO:` comment block in each file to find the exact line.
+
 ## Design
 
 See [docs/workflow-design.md](docs/workflow-design.md) for a detailed breakdown

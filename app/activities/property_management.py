@@ -14,6 +14,9 @@ _TENANTS: dict[int, TenantData] = {
 @activity.defn
 async def get_tenant_data(unit: int) -> TenantData:
     activity.logger.info("Fetching tenant data for unit %s", unit)
+    # ── DEMO: fast-fail (no retries) ─────────────────────────────────────────
+    # raise ApplicationError("Unknown unit — non-retryable fast fail", non_retryable=True)
+    # ─────────────────────────────────────────────────────────────────────────
     await asyncio.sleep(3)
     tenant = _TENANTS.get(unit)
     if tenant is None:

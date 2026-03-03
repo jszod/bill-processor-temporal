@@ -1,6 +1,7 @@
 import asyncio
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from app.shared.data import BillData
 
@@ -23,6 +24,10 @@ async def update_income_expense_overview(bill: BillData) -> None:
         bill.unit,
         bill.amount,
     )
+    # ── DEMO: saga compensation (retries then compensates) ────────────────────
+    # raise RuntimeError("Sheets API unavailable")  # retries 5x, then saga
+    # raise ApplicationError("Quota exceeded", non_retryable=True)  # immediate saga failure AppError from Temporal
+    # ─────────────────────────────────────────────────────────────────────────
     await asyncio.sleep(3)
 
 
