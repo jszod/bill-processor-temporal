@@ -22,7 +22,7 @@ async def main():
         file_path,
         id=_workflow_id(file_path),
         task_queue="bill-processor",
-        id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+        # id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
     )
     print(f"Result: {result}")
 

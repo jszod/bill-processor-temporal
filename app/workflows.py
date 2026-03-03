@@ -53,6 +53,8 @@ class BillProcessorWorkflow:
     async def run(self, file_path: str) -> BillData:
         compensations: list[tuple] = []
 
+        workflow.logger.info("[1/10] Starting: %s", file_path)
+
         try:
             # ── File processing ──────────────────────────────────────────────
             bill: BillData = await workflow.execute_activity(
@@ -61,6 +63,12 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=NO_RETRY,
             )
+            workflow.logger.info(
+                "[2/10] Bill data extracted — unit=%s amount=%s date_range=%s",
+                bill.unit,
+                bill.amount,
+                bill.date_range,
+            )
 
             bill = await workflow.execute_activity(
                 add_unit_and_date_range_to_file,
@@ -68,6 +76,7 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+            workflow.logger.info("[3/10] File renamed: %s", bill.processed_file_name)
 
             # ── Property Management (Apartments.com) ─────────────────────────
             tenant: TenantData = await workflow.execute_activity(
@@ -76,6 +85,7 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+            workflow.logger.info("[4/10] Tenant resolved: %s <%s>", tenant.name, tenant.email)
 
             await workflow.execute_activity(
                 enter_bill_apartments_com,
@@ -84,6 +94,7 @@ class BillProcessorWorkflow:
                 retry_policy=DEFAULT_RETRY,
             )
             compensations.append((undo_apartments_com_entry, [bill, tenant]))
+            workflow.logger.info("[5/10] Apartments.com entry confirmed")
 
             # ── Accounting — saga boundary ───────────────────────────────────
             await workflow.execute_activity(
@@ -93,6 +104,7 @@ class BillProcessorWorkflow:
                 retry_policy=DEFAULT_RETRY,
             )
             compensations.append((undo_monthly_expenses, [bill]))
+            workflow.logger.info("[6/10] Monthly expenses updated")
 
             await workflow.execute_activity(
                 update_income_expense_overview,
@@ -101,8 +113,12 @@ class BillProcessorWorkflow:
                 retry_policy=DEFAULT_RETRY,
             )
             compensations.append((undo_income_expense_overview, [bill]))
+            workflow.logger.info("[7/10] Income/expense overview updated")
 
         except Exception:
+            workflow.logger.info(
+                "Saga compensation triggered — reversing %d step(s)", len(compensations)
+            )
             for activity_fn, activity_args in reversed(compensations):
                 try:
                     await workflow.execute_activity(
@@ -125,6 +141,7 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+            workflow.logger.info("[8/10] Email draft created: %s", draft_id)
 
             await workflow.execute_activity(
                 attach_bill,
@@ -132,14 +149,19 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+            workflow.logger.info("[9/10] Bill attached to draft")
 
             # Human review gate
+            workflow.logger.info(
+                "Waiting for email review signal (timeout %s)...", REVIEW_TIMEOUT
+            )
             approved_in_time = await workflow.wait_condition(
                 lambda: self._review_status != "pending",
                 timeout=REVIEW_TIMEOUT,
             )
             if not approved_in_time:
                 self._review_status = "timed_out"
+            workflow.logger.info("Review status: %s", self._review_status)
 
             if self._review_status == "approved":
                 await workflow.execute_activity(
@@ -148,6 +170,7 @@ class BillProcessorWorkflow:
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     retry_policy=DEFAULT_RETRY,
                 )
+                workflow.logger.info("Email sent")
         except Exception:
             workflow.logger.warning("Courtesy email failed — continuing")
 
@@ -159,7 +182,11 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+            workflow.logger.info("[10/10] File archived to Google Drive")
         except Exception:
             workflow.logger.warning("Archive failed — continuing")
 
+        workflow.logger.info(
+            "Workflow complete — processed_file_name=%s", bill.processed_file_name
+        )
         return bill
