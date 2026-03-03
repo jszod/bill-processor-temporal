@@ -13,7 +13,7 @@ _TENANTS: dict[int, TenantData] = {
 @activity.defn
 async def get_tenant_data(unit: int) -> TenantData:
     activity.logger.info("Fetching tenant data for unit %s", unit)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(3)
     tenant = _TENANTS.get(unit)
     if tenant is None:
         raise ValueError(f"No tenant found for unit {unit}")
@@ -28,7 +28,7 @@ async def enter_bill_apartments_com(bill: BillData, tenant: TenantData) -> str:
         bill.amount,
         tenant.name,
     )
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
     confirmation = f"APT-{bill.unit}-{bill.date_range}"
     activity.logger.info("Apartments.com confirmation: %s", confirmation)
     return confirmation
@@ -41,4 +41,4 @@ async def undo_apartments_com_entry(bill: BillData, tenant: TenantData) -> None:
         bill.unit,
         bill.date_range,
     )
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(3)

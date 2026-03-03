@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
@@ -5,21 +6,21 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from app.activities import (
-        extract_bill_data,
         add_unit_and_date_range_to_file,
-        get_tenant_data,
-        enter_bill_apartments_com,
-        undo_apartments_com_entry,
-        update_monthly_expenses,
-        update_income_expense_overview,
-        undo_monthly_expenses,
-        undo_income_expense_overview,
-        draft_email_from_template,
         attach_bill,
-        send_email,
+        draft_email_from_template,
+        enter_bill_apartments_com,
+        extract_bill_data,
+        get_tenant_data,
         move_file_to_gdrive,
+        send_email,
+        undo_apartments_com_entry,
+        undo_income_expense_overview,
+        undo_monthly_expenses,
+        update_income_expense_overview,
+        update_monthly_expenses,
     )
-    from app.shared.data import BillData, TenantData
+    from app.shared.data import BillData, TenantData, WorkflowResult
 
 NO_RETRY = RetryPolicy(maximum_attempts=1)
 DEFAULT_RETRY = RetryPolicy(
@@ -28,14 +29,18 @@ DEFAULT_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     maximum_interval=timedelta(minutes=1),
 )
-ACTIVITY_TIMEOUT = timedelta(minutes=5)
-REVIEW_TIMEOUT = timedelta(minutes=5)
+ACTIVITY_TIMEOUT = timedelta(minutes=1)
+REVIEW_TIMEOUT = timedelta(seconds=35)
 
 
 @workflow.defn
 class BillProcessorWorkflow:
     def __init__(self) -> None:
-        self._review_status: str = "pending"  # pending | approved | rejected | timed_out
+        self._review_status: str = (
+            "pending"  # pending | approved | rejected | timed_out
+        )
+        self._email_status: str = "failed"
+        self._archive_status: str = "failed"
 
     @workflow.signal
     async def approve_email(self) -> None:
@@ -50,43 +55,46 @@ class BillProcessorWorkflow:
         return self._review_status
 
     @workflow.run
-    async def run(self, file_path: str) -> BillData:
+    async def run(self, file_path: str) -> WorkflowResult:
         compensations: list[tuple] = []
 
-        workflow.logger.info("[1/10] Starting: %s", file_path)
+        workflow.logger.info("/n/n[1/10] Starting: %s", file_path)
 
+        # ── File processing ──────────────────────────────────────────────
+        bill: BillData = await workflow.execute_activity(
+            extract_bill_data,
+            file_path,
+            start_to_close_timeout=ACTIVITY_TIMEOUT,
+            retry_policy=NO_RETRY,
+        )
+        workflow.logger.info(
+            "[2/10] Bill data extracted — unit=%s amount=%s date_range=%s",
+            bill.unit,
+            bill.amount,
+            bill.date_range,
+        )
+
+        bill = await workflow.execute_activity(
+            add_unit_and_date_range_to_file,
+            bill,
+            start_to_close_timeout=ACTIVITY_TIMEOUT,
+            retry_policy=DEFAULT_RETRY,
+        )
+        workflow.logger.info("[3/10] File renamed: %s", bill.processed_file_name)
+
+        # ── Property Management (Apartments.com) ─────────────────────────
+        tenant: TenantData = await workflow.execute_activity(
+            get_tenant_data,
+            bill.unit,
+            start_to_close_timeout=ACTIVITY_TIMEOUT,
+            retry_policy=DEFAULT_RETRY,
+        )
+        workflow.logger.info(
+            "[4/10] Tenant resolved: %s <%s>", tenant.name, tenant.email
+        )
+
+        # ---Saga Begins --------------------------------------------------
         try:
-            # ── File processing ──────────────────────────────────────────────
-            bill: BillData = await workflow.execute_activity(
-                extract_bill_data,
-                file_path,
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
-                retry_policy=NO_RETRY,
-            )
-            workflow.logger.info(
-                "[2/10] Bill data extracted — unit=%s amount=%s date_range=%s",
-                bill.unit,
-                bill.amount,
-                bill.date_range,
-            )
-
-            bill = await workflow.execute_activity(
-                add_unit_and_date_range_to_file,
-                bill,
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
-                retry_policy=DEFAULT_RETRY,
-            )
-            workflow.logger.info("[3/10] File renamed: %s", bill.processed_file_name)
-
-            # ── Property Management (Apartments.com) ─────────────────────────
-            tenant: TenantData = await workflow.execute_activity(
-                get_tenant_data,
-                bill.unit,
-                start_to_close_timeout=ACTIVITY_TIMEOUT,
-                retry_policy=DEFAULT_RETRY,
-            )
-            workflow.logger.info("[4/10] Tenant resolved: %s <%s>", tenant.name, tenant.email)
-
             await workflow.execute_activity(
                 enter_bill_apartments_com,
                 args=[bill, tenant],
@@ -96,7 +104,7 @@ class BillProcessorWorkflow:
             compensations.append((undo_apartments_com_entry, [bill, tenant]))
             workflow.logger.info("[5/10] Apartments.com entry confirmed")
 
-            # ── Accounting — saga boundary ───────────────────────────────────
+            # ── Accounting -------—-----───────────────────────────────────
             await workflow.execute_activity(
                 update_monthly_expenses,
                 bill,
@@ -132,7 +140,7 @@ class BillProcessorWorkflow:
                         "Compensation %s failed — continuing", activity_fn.__name__
                     )
             raise
-
+        # --- Saga Ends -------------------------------------------------------
         # ── Notification — best effort ───────────────────────────────────────
         try:
             draft_id: str = await workflow.execute_activity(
@@ -155,11 +163,12 @@ class BillProcessorWorkflow:
             workflow.logger.info(
                 "Waiting for email review signal (timeout %s)...", REVIEW_TIMEOUT
             )
-            approved_in_time = await workflow.wait_condition(
-                lambda: self._review_status != "pending",
-                timeout=REVIEW_TIMEOUT,
-            )
-            if not approved_in_time:
+            try:
+                await workflow.wait_condition(
+                    lambda: self._review_status != "pending",
+                    timeout=REVIEW_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
                 self._review_status = "timed_out"
             workflow.logger.info("Review status: %s", self._review_status)
 
@@ -170,7 +179,10 @@ class BillProcessorWorkflow:
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
                     retry_policy=DEFAULT_RETRY,
                 )
+                self._email_status = "sent"
                 workflow.logger.info("Email sent")
+            else:
+                self._email_status = self._review_status  # "rejected" or "timed_out"
         except Exception:
             workflow.logger.warning("Courtesy email failed — continuing")
 
@@ -182,6 +194,7 @@ class BillProcessorWorkflow:
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
+            self._archive_status = "archived"
             workflow.logger.info("[10/10] File archived to Google Drive")
         except Exception:
             workflow.logger.warning("Archive failed — continuing")
@@ -189,4 +202,8 @@ class BillProcessorWorkflow:
         workflow.logger.info(
             "Workflow complete — processed_file_name=%s", bill.processed_file_name
         )
-        return bill
+        return WorkflowResult(
+            bill=bill,
+            email_status=self._email_status,
+            archive_status=self._archive_status,
+        )

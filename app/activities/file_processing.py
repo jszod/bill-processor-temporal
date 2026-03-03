@@ -34,7 +34,7 @@ def _add_suffix(file_name: str, date_range: str) -> str:
 @activity.defn
 async def extract_bill_data(file_path: str) -> BillData:
     activity.logger.info("Extracting bill data from %s", file_path)
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
     unit = 104
     stub = _BILL_DATA[unit]
     return BillData(
@@ -54,7 +54,7 @@ async def add_unit_and_date_range_to_file(bill: BillData) -> BillData:
         bill.date_range,
         bill.processed_file_name,
     )
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(3)
     new_name = _add_prefix(bill.processed_file_name, bill.unit)
     new_name = _add_suffix(new_name, bill.date_range)
     return dataclasses.replace(bill, processed_file_name=new_name)

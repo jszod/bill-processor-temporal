@@ -13,7 +13,7 @@ async def update_monthly_expenses(bill: BillData) -> None:
         bill.amount,
         bill.date_range,
     )
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
 
 
 @activity.defn
@@ -23,7 +23,7 @@ async def update_income_expense_overview(bill: BillData) -> None:
         bill.unit,
         bill.amount,
     )
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
 
 
 @activity.defn
@@ -33,7 +33,7 @@ async def undo_monthly_expenses(bill: BillData) -> None:
         bill.unit,
         bill.date_range,
     )
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(3)
 
 
 @activity.defn
@@ -43,4 +43,4 @@ async def undo_income_expense_overview(bill: BillData) -> None:
         bill.unit,
         bill.date_range,
     )
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(3)
