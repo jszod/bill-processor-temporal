@@ -1,6 +1,7 @@
 import asyncio
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from app.shared.data import BillData, TenantData
 
@@ -16,7 +17,7 @@ async def get_tenant_data(unit: int) -> TenantData:
     await asyncio.sleep(3)
     tenant = _TENANTS.get(unit)
     if tenant is None:
-        raise ValueError(f"No tenant found for unit {unit}")
+        raise ApplicationError(f"No tenant found for unit {unit}", non_retryable=True)
     return tenant
 
 

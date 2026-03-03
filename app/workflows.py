@@ -1,4 +1,3 @@
-import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
@@ -22,7 +21,6 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.shared.data import BillData, TenantData, WorkflowResult
 
-NO_RETRY = RetryPolicy(maximum_attempts=1)
 DEFAULT_RETRY = RetryPolicy(
     maximum_attempts=5,
     backoff_coefficient=2.0,
@@ -30,6 +28,7 @@ DEFAULT_RETRY = RetryPolicy(
     maximum_interval=timedelta(minutes=1),
 )
 ACTIVITY_TIMEOUT = timedelta(minutes=1)
+SCHEDULE_TIMEOUT = timedelta(minutes=10)
 REVIEW_TIMEOUT = timedelta(seconds=35)
 
 
@@ -43,11 +42,11 @@ class BillProcessorWorkflow:
         self._archive_status: str = "failed"
 
     @workflow.signal
-    async def approve_email(self) -> None:
+    def approve_email(self) -> None:
         self._review_status = "approved"
 
     @workflow.signal
-    async def reject_email(self) -> None:
+    def reject_email(self) -> None:
         self._review_status = "rejected"
 
     @workflow.query
@@ -58,14 +57,15 @@ class BillProcessorWorkflow:
     async def run(self, file_path: str) -> WorkflowResult:
         compensations: list[tuple] = []
 
-        workflow.logger.info("/n/n[1/10] Starting: %s", file_path)
+        workflow.logger.info("\n\n[1/10] Starting: %s", file_path)
 
         # ── File processing ──────────────────────────────────────────────
         bill: BillData = await workflow.execute_activity(
             extract_bill_data,
             file_path,
             start_to_close_timeout=ACTIVITY_TIMEOUT,
-            retry_policy=NO_RETRY,
+            schedule_to_close_timeout=SCHEDULE_TIMEOUT,
+            retry_policy=DEFAULT_RETRY,
         )
         workflow.logger.info(
             "[2/10] Bill data extracted — unit=%s amount=%s date_range=%s",
@@ -78,6 +78,7 @@ class BillProcessorWorkflow:
             add_unit_and_date_range_to_file,
             bill,
             start_to_close_timeout=ACTIVITY_TIMEOUT,
+            schedule_to_close_timeout=SCHEDULE_TIMEOUT,
             retry_policy=DEFAULT_RETRY,
         )
         workflow.logger.info("[3/10] File renamed: %s", bill.processed_file_name)
@@ -87,6 +88,7 @@ class BillProcessorWorkflow:
             get_tenant_data,
             bill.unit,
             start_to_close_timeout=ACTIVITY_TIMEOUT,
+            schedule_to_close_timeout=SCHEDULE_TIMEOUT,
             retry_policy=DEFAULT_RETRY,
         )
         workflow.logger.info(
@@ -99,6 +101,7 @@ class BillProcessorWorkflow:
                 enter_bill_apartments_com,
                 args=[bill, tenant],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
             compensations.append((undo_apartments_com_entry, [bill, tenant]))
@@ -109,6 +112,7 @@ class BillProcessorWorkflow:
                 update_monthly_expenses,
                 bill,
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
             compensations.append((undo_monthly_expenses, [bill]))
@@ -118,6 +122,7 @@ class BillProcessorWorkflow:
                 update_income_expense_overview,
                 bill,
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
             compensations.append((undo_income_expense_overview, [bill]))
@@ -133,6 +138,7 @@ class BillProcessorWorkflow:
                         activity_fn,
                         args=activity_args,
                         start_to_close_timeout=ACTIVITY_TIMEOUT,
+                        schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                         retry_policy=DEFAULT_RETRY,
                     )
                 except Exception:
@@ -143,10 +149,12 @@ class BillProcessorWorkflow:
         # --- Saga Ends -------------------------------------------------------
         # ── Notification — best effort ───────────────────────────────────────
         try:
+            idempotency_key = workflow.info().workflow_id
             draft_id: str = await workflow.execute_activity(
                 draft_email_from_template,
-                args=[bill, tenant],
+                args=[bill, tenant, idempotency_key],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
             workflow.logger.info("[8/10] Email draft created: %s", draft_id)
@@ -155,6 +163,7 @@ class BillProcessorWorkflow:
                 attach_bill,
                 args=[draft_id, bill],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
             workflow.logger.info("[9/10] Bill attached to draft")
@@ -163,12 +172,11 @@ class BillProcessorWorkflow:
             workflow.logger.info(
                 "Waiting for email review signal (timeout %s)...", REVIEW_TIMEOUT
             )
-            try:
-                await workflow.wait_condition(
-                    lambda: self._review_status != "pending",
-                    timeout=REVIEW_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
+            received = await workflow.wait_condition(
+                lambda: self._review_status != "pending",
+                timeout=REVIEW_TIMEOUT,
+            )
+            if not received:
                 self._review_status = "timed_out"
             workflow.logger.info("Review status: %s", self._review_status)
 
@@ -177,6 +185,7 @@ class BillProcessorWorkflow:
                     send_email,
                     draft_id,
                     start_to_close_timeout=ACTIVITY_TIMEOUT,
+                    schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                     retry_policy=DEFAULT_RETRY,
                 )
                 self._email_status = "sent"
@@ -192,6 +201,7 @@ class BillProcessorWorkflow:
                 move_file_to_gdrive,
                 bill,
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
+                schedule_to_close_timeout=SCHEDULE_TIMEOUT,
                 retry_policy=DEFAULT_RETRY,
             )
             self._archive_status = "archived"

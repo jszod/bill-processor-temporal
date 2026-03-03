@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from app.shared.data import BillData
 
@@ -36,7 +37,9 @@ async def extract_bill_data(file_path: str) -> BillData:
     activity.logger.info("Extracting bill data from %s", file_path)
     await asyncio.sleep(3)
     unit = 104
-    stub = _BILL_DATA[unit]
+    stub = _BILL_DATA.get(unit)
+    if stub is None:
+        raise ApplicationError(f"No bill data for unit {unit}", non_retryable=True)
     return BillData(
         input_file_name=file_path,
         processed_file_name=file_path,

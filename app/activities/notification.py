@@ -1,5 +1,4 @@
 import asyncio
-import uuid
 
 from temporalio import activity
 
@@ -7,7 +6,7 @@ from app.shared.data import BillData, TenantData
 
 
 @activity.defn
-async def draft_email_from_template(bill: BillData, tenant: TenantData) -> str:
+async def draft_email_from_template(bill: BillData, tenant: TenantData, idempotency_key: str) -> str:
     activity.logger.info(
         "Drafting bill email to %s for unit=%s amount=%s",
         tenant.email,
@@ -15,7 +14,7 @@ async def draft_email_from_template(bill: BillData, tenant: TenantData) -> str:
         bill.amount,
     )
     await asyncio.sleep(3)
-    draft_id = str(uuid.uuid4())
+    draft_id = idempotency_key  # stable across retries
     activity.logger.info("Created draft %s", draft_id)
     return draft_id
 

@@ -22,33 +22,9 @@ BillProcessorWorkflow
 └── move_file_to_gdrive                 best effort
 ```
 
-## Diagram
+## Process Diagram
 
-```mermaid
-graph TD
-    START([file_path])
-    A1[extract_bill_data]
-    A2[add_unit_and_date_range_to_file]
-    A3[get_tenant_data]
-    A4[enter_bill_apartments_com]
-    A5[update_monthly_expenses]
-    A6[update_income_expense_overview]
-    A7[draft_email_from_template]
-    A8[attach_bill]
-    D1{approve / reject / timeout}
-    A9[send_email]
-    A10[move_file_to_gdrive]
-    SUCCESS([Return BillData])
-    FAIL([Workflow fails])
-
-    START --> A1 --> A2 --> A3 --> A4
-    A4 --> A5 --> A6
-    A6 -->|success| A7 --> A8 --> D1
-    A6 -.->|failure — compensate| FAIL
-    D1 -->|approved| A9 --> A10
-    D1 -->|rejected / timeout| A10
-    A10 --> SUCCESS
-```
+![Bill Processor Workflow](images/bill-processor-diagram-v3.png)
 
 ## Workflow Configuration
 
@@ -66,8 +42,9 @@ a duplicate start if a successful execution already exists within the retention 
 
 ## Workflow Return Value
 
-On success the workflow returns the final `BillData` (with the fully resolved
-`processed_file_name`). This makes the result visible in the Temporal UI and
+On success the workflow returns a `WorkflowResult` containing the final `BillData`
+(with the fully resolved `processed_file_name`), plus `email_status` and
+`archive_status` strings. This makes the result visible in the Temporal UI and
 accessible to the caller of `run_workflow.py` without a separate query round-trip.
 
 On failure the workflow raises the original exception after running any
@@ -79,11 +56,12 @@ applicable compensations.
 
 | # | Activity | Retry? | On Retry Exhaustion |
 |---|---|---|---|
-| 1 | `extract_bill_data` | No | Manual intervention — stop |
+| 1 | `extract_bill_data` | Yes | Stop |
 | 2 | `add_unit_and_date_range_to_file` | Yes | Stop |
 
-`extract_bill_data` is `NO_RETRY` because parsing failures are deterministic
-(a corrupt or unrecognised PDF will not self-heal on retry).
+`extract_bill_data` uses `DEFAULT_RETRY`. Invalid or missing bill data raises
+`ApplicationError(non_retryable=True)` and fast-fails immediately; `DEFAULT_RETRY`
+covers transient I/O failures that may self-heal on a subsequent attempt.
 
 ### Property Management (Apartments.com)
 
@@ -92,7 +70,7 @@ applicable compensations.
 | 3 | `get_tenant_data` | Yes | Fast fail — stop |
 | 4 | `enter_bill_apartments_com` | Yes | Fast fail — stop |
 
-`get_tenant_data` resolves the unit number extracted from the bill to a canonical Apartments.com tenant. In production, the extracted unit label (e.g. "Unit 104", "Apt. 104") may not match how Apartments.com identifies the unit, so this activity performs a config-driven lookup — a "unit registry" maintained in Google Sheets maps extracted labels to Apartments.com unit IDs. For this exercise the activity is a stub returning hardcoded data, but the separation is intentional: keeping resolution out of `enter_bill_apartments_com` means the entry logic never has to reason about label normalisation.
+`get_tenant_data` resolves the unit number extracted from the bill to a canonical Apartments.com tenant. In production, the extracted unit label (e.g. "Unit 104", "Apt. 104") may not match how Apartments.com identifies the unit, so this activity performs a config-driven lookup — a "unit registry" maintained in Google Sheets maps extracted labels to Apartments.com unit IDs. For this exercise the activity is a stub returning hardcoded data, but the separation is intentional: keeping resolution out of `enter_bill_apartments_com` means the entry logic never has to reason about label normalisation. An unknown unit raises `ApplicationError(non_retryable=True)` and fast-fails immediately.
 
 ### Accounting (Google Sheets)
 
@@ -153,7 +131,7 @@ review gate in the notification phase.
 | Signal | `reject_email` | Reviewer rejects — `send_email` is skipped |
 | Query | `email_review_status` | Returns current review state: `pending`, `approved`, `rejected`, or `timed_out` |
 
-**Timeout:** 5 minutes (`REVIEW_TIMEOUT = timedelta(minutes=5)` — demo value; production would
+**Timeout:** 35 seconds (`REVIEW_TIMEOUT = timedelta(seconds=35)` — demo value; production would
 use hours or days). If no signal arrives within the timeout, the workflow treats it as rejected
 and skips `send_email`.
 
@@ -180,6 +158,12 @@ class BillData:
 class TenantData:
     name: str
     email: str
+
+@dataclass
+class WorkflowResult:
+    bill: BillData
+    email_status: str    # "sent" | "rejected" | "timed_out" | "failed"
+    archive_status: str  # "archived" | "failed"
 ```
 
 ## Data Flow
@@ -193,7 +177,8 @@ enter_bill_apartments_com(BillData,
 update_monthly_expenses(BillData)         → None
 update_income_expense_overview(BillData)  → None
 draft_email_from_template(BillData,
-                          TenantData)     → draft_id: str
+                          TenantData,
+                          idempotency_key)→ draft_id: str
 attach_bill(draft_id, BillData)           → None
 [wait: approve_email / reject_email signal, or 5 min timeout]
 send_email(draft_id)                      → None  ← skipped if not approved
@@ -208,41 +193,14 @@ returned value replaces the previous binding in the workflow.
 
 | Policy | `maximum_attempts` | Used by |
 |---|---|---|
-| `NO_RETRY` | 1 | `extract_bill_data` |
-| `DEFAULT_RETRY` | 5, 2× backoff, 1 s–1 m | all other activities |
+| `DEFAULT_RETRY` | 5, 2× backoff, 1 s–1 m | all activities |
 
-All activities share a single `start_to_close_timeout` of 5 minutes. This
-covers the expected upper bound for any individual external call (Sheets API,
-Gmail, Google Drive, Apartments.com scraping). If future profiling shows a
-specific activity consistently taking longer, it should get its own timeout.
-
-`NO_RETRY` via `maximum_attempts=1` is a POC shortcut. In production,
-`extract_bill_data` would raise a typed non-retryable error (e.g.
-`PDFParseError`) and `DEFAULT_RETRY` would include a `non_retryable_error_types`
-list so that business-rule failures fast-fail immediately without burning retry
-attempts.
-
-## Production Considerations
-
-### Idempotency
-
-Two layers of idempotency are already in place:
-
-- **Activity replay** — within a single execution, Temporal records each completed activity result in the event history. If the worker crashes and resumes, completed activities are replayed from history and their code is never re-executed. No double-writes from retries.
-- **Workflow ID deduplication** — the Workflow ID is derived from the input file name and the reuse policy is `ALLOW_DUPLICATE_FAILED_ONLY`. Re-triggering the workflow on a file that already completed successfully is rejected by the Temporal server.
-
-The remaining gap is a **re-run after failure**: a new workflow execution started against the same file after a previous execution failed. Each mutating activity would run from scratch against external systems. The fix is a check-before-write pattern in each activity, keyed on `unit + date_range`:
-
-| Activity | Gap | Production fix |
-|---|---|---|
-| `add_unit_and_date_range_to_file` | Original file path no longer exists if already renamed | Check whether the processed filename already exists; if so, skip the rename and return it |
-| `enter_bill_apartments_com` | Could create a duplicate ledger entry | Query for an existing entry before writing |
-| `update_monthly_expenses` | Could append a duplicate row | Check the sheet for an existing row before appending |
-| `update_income_expense_overview` | Same | Same |
-| `draft_email_from_template` | Could create multiple drafts | Search for an existing draft by a bill-keyed subject or label; reuse if found |
-| `move_file_to_gdrive` | Source file may already be gone | Check whether the file already exists in Drive before uploading |
-
-`send_email` carries unavoidable at-least-once risk: if the activity fails after Gmail accepts the send but before Temporal records the result, the email will be sent twice on retry. This is acceptable for a best-effort notification; production could mitigate it with a sent-flag stored in the draft metadata.
+All activities share two timeouts: `start_to_close_timeout` of 1 minute (per
+attempt) and `schedule_to_close_timeout` of 10 minutes (across all attempts
+including queuing time). The 1-minute per-attempt limit covers the expected
+upper bound for any individual external call (Sheets API, Gmail, Google Drive,
+Apartments.com scraping). If future profiling shows a specific activity
+consistently taking longer, it should get its own timeout.
 
 ## File Layout
 
@@ -261,3 +219,24 @@ app/
     ├── notification.py           draft_email_*, attach_bill, send_email
     └── archive.py                move_file_to_gdrive
 ```
+
+## Production Considerations
+
+### Idempotency
+
+Two layers of idempotency are already in place:
+
+- **Activity replay** — within a single execution, Temporal records each completed activity result in the event history. If the worker crashes and resumes, completed activities are replayed from history and their code is never re-executed. No double-writes from retries.
+- **Workflow ID deduplication** — the Workflow ID is derived from the input file name and the reuse policy is `ALLOW_DUPLICATE_FAILED_ONLY`. Re-triggering the workflow on a file that already completed successfully is rejected by the Temporal server.
+
+The remaining gap is **re-run after failure** — if a new execution starts on the same file after a prior one failed, mutating activities run from scratch against external systems. Mitigation is a check-before-write pattern keyed on `unit + date_range`:
+
+| Activity | Gap | Production fix |
+|---|---|---|
+| `add_unit_and_date_range_to_file` | Original file path no longer exists if already renamed | Check whether the processed filename already exists; if so, skip the rename and return it |
+| `enter_bill_apartments_com` | Could create a duplicate ledger entry | Query for an existing entry before writing |
+| `update_monthly_expenses` / `update_income_expense_overview` | Could append duplicate rows | Check the sheet for an existing row before appending |
+| `draft_email_from_template` | Could create multiple drafts | Search for an existing draft by a bill-keyed subject or label; reuse if found |
+| `move_file_to_gdrive` | Source file may already be gone | Check whether the file already exists in Drive before uploading |
+
+`send_email` carries unavoidable at-least-once risk: if the activity fails after Gmail accepts the send but before Temporal records the result, the email will be sent twice on retry. This is acceptable for a best-effort notification; production could mitigate it with a sent-flag stored in the draft metadata.
