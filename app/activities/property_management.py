@@ -38,6 +38,7 @@ async def enter_bill_apartments_com(bill: BillData, tenant: TenantData) -> str:
     return confirmation
 
 
+# Compensation activity — paired reversal for enter_bill_apartments_com; called by saga rollback on failure
 @activity.defn
 async def undo_apartments_com_entry(bill: BillData, tenant: TenantData) -> None:
     activity.logger.info(

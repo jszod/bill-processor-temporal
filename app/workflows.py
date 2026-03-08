@@ -22,6 +22,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.shared.data import BillData, TenantData, WorkflowResult
 
+# Retry policy with exponential backoff — start_to_close caps a single attempt, schedule_to_close caps the entire activity including retries
 DEFAULT_RETRY = RetryPolicy(
     maximum_attempts=5,
     backoff_coefficient=2.0,
@@ -33,15 +34,18 @@ SCHEDULE_TIMEOUT = timedelta(minutes=10)
 REVIEW_TIMEOUT = timedelta(seconds=35)
 
 
+# Workflow definition — @workflow.defn registers this class as a durable Temporal workflow
 @workflow.defn
 class BillProcessorWorkflow:
     def __init__(self) -> None:
+        # Workflow state — instance variables persist across replays and can be updated by signals
         self._review_status: str = (
             "pending"  # pending | approved | rejected | timed_out
         )
         self._email_status: str = "failed"
         self._archive_status: str = "failed"
 
+    # Signals — allow external callers to push events into a running workflow without polling
     @workflow.signal
     def approve_email(self) -> None:
         self._review_status = "approved"
@@ -50,12 +54,15 @@ class BillProcessorWorkflow:
     def reject_email(self) -> None:
         self._review_status = "rejected"
 
+    # Query — read-only inspection of workflow state; does not advance execution
     @workflow.query
     def email_review_status(self) -> str:
         return self._review_status
 
+    # Workflow entry point — Temporal calls this single async method to execute the workflow
     @workflow.run
     async def run(self, file_path: str) -> WorkflowResult:
+        # Saga compensation pattern — tracks completed activities to reverse on failure
         compensations: list[tuple] = []
 
         workflow.logger.info("\n\n[1/10] Starting: %s", file_path)
@@ -129,6 +136,7 @@ class BillProcessorWorkflow:
             compensations.append((undo_income_expense_overview, [bill]))
             workflow.logger.info("[7/10] Income/expense overview updated")
 
+        # Saga rollback — runs compensation activities in reverse order to undo completed steps
         except Exception:
             workflow.logger.info(
                 "Saga compensation triggered — reversing %d step(s)", len(compensations)
@@ -148,8 +156,11 @@ class BillProcessorWorkflow:
                     )
             raise
         # --- Saga Ends -------------------------------------------------------
+
+        # Best-effort section — failures are logged but do not propagate; the workflow always completes
         # ── Notification — best effort ───────────────────────────────────────
         try:
+            # Idempotency key — derived from the workflow ID so retries reuse the same draft rather than creating duplicates
             idempotency_key = workflow.info().workflow_id
             draft_id: str = await workflow.execute_activity(
                 draft_email_from_template,
@@ -169,7 +180,7 @@ class BillProcessorWorkflow:
             )
             workflow.logger.info("[9/10] Bill attached to draft")
 
-            # Human review gate
+            # Human review gate — wait_condition blocks the workflow until a signal arrives or the timeout fires
             workflow.logger.info(
                 "Waiting for email review signal (timeout %s)...", REVIEW_TIMEOUT
             )
@@ -178,6 +189,7 @@ class BillProcessorWorkflow:
                     lambda: self._review_status != "pending",
                     timeout=REVIEW_TIMEOUT,
                 )
+            # asyncio.TimeoutError is raised by wait_condition on timeout; convert it to a status string
             except asyncio.TimeoutError:
                 self._review_status = "timed_out"
             workflow.logger.info("Review status: %s", self._review_status)
@@ -197,6 +209,7 @@ class BillProcessorWorkflow:
         except Exception:
             workflow.logger.warning("Courtesy email failed — continuing")
 
+        # Best-effort section — failures are logged but do not propagate; the workflow always completes
         # ── Archive — best effort ────────────────────────────────────────────
         try:
             await workflow.execute_activity(

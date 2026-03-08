@@ -24,13 +24,13 @@ async def update_income_expense_overview(bill: BillData) -> None:
         bill.unit,
         bill.amount,
     )
-    # ── DEMO: saga compensation (retries then compensates) ────────────────────
+    # Demo hooks — uncomment to simulate failures and trigger saga or best-effort paths
     # raise RuntimeError("Sheets API unavailable")  # retries 5x, then saga
     # raise ApplicationError("Quota exceeded", non_retryable=True)  # immediate saga failure AppError from Temporal
-    # ─────────────────────────────────────────────────────────────────────────
     await asyncio.sleep(3)
 
 
+# Compensation activity — paired reversal for update_monthly_expenses
 @activity.defn
 async def undo_monthly_expenses(bill: BillData) -> None:
     activity.logger.info(
@@ -41,6 +41,7 @@ async def undo_monthly_expenses(bill: BillData) -> None:
     await asyncio.sleep(3)
 
 
+# Compensation activity — paired reversal for update_income_expense_overview
 @activity.defn
 async def undo_income_expense_overview(bill: BillData) -> None:
     activity.logger.info(

@@ -15,10 +15,10 @@ async def draft_email_from_template(
         bill.unit,
         bill.amount,
     )
-    # ── DEMO: best-effort failure (workflow still completes) ──────────────────
+    # Demo hooks — uncomment to simulate failures and trigger saga or best-effort paths
     # raise RuntimeError("Gmail API unavailable")
-    # ─────────────────────────────────────────────────────────────────────────
     await asyncio.sleep(3)
+    # Idempotency — reusing the key as draft ID makes re-runs safe; no duplicate emails on retry
     draft_id = idempotency_key  # stable across retries
     activity.logger.info("Created draft %s", draft_id)
     return draft_id

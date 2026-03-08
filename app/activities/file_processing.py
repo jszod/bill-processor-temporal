@@ -16,7 +16,7 @@ class _BillStub(NamedTuple):
     date_range: str
 
 
-# Stub bill registry — replace with real apartments.com lookup
+# Stub registry — replaces real PDF extraction; keyed by unit number for demo purposes
 _BILL_DATA: dict[int, _BillStub] = {
     104: _BillStub(amount=134.25, date_range="2026_01-03"),
 }
@@ -39,6 +39,7 @@ async def extract_bill_data(file_path: str) -> BillData:
     unit = 104
     stub = _BILL_DATA.get(unit)
     if stub is None:
+        # Non-retryable error — ApplicationError with non_retryable=True tells Temporal to skip retries and fail immediately
         raise ApplicationError(f"No bill data for unit {unit}", non_retryable=True)
     return BillData(
         input_file_name=file_path,

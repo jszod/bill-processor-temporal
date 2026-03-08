@@ -29,7 +29,9 @@ async def main():
     temporalio.activity.logger.activity_info_on_message = False
     temporalio.workflow.logger.workflow_info_on_message = False
 
+    # Temporal client — connects to the Temporal server at localhost:7233
     client = await Client.connect("localhost:7233")
+    # Worker registration — binds this process to the task queue and declares which workflows and activities it can execute
     worker = Worker(
         client,
         task_queue="bill-processor",
