@@ -71,8 +71,8 @@ class BillProcessorWorkflow:
         bill: BillData = await workflow.execute_activity(
             extract_bill_data,
             file_path,
-            start_to_close_timeout=ACTIVITY_TIMEOUT,
-            schedule_to_close_timeout=SCHEDULE_TIMEOUT,
+            start_to_close_timeout=ACTIVITY_TIMEOUT,  # Single attempt timeout
+            schedule_to_close_timeout=SCHEDULE_TIMEOUT,  # Entire activity including retries
             retry_policy=DEFAULT_RETRY,
         )
         workflow.logger.info(
